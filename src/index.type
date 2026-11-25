@@ -1,0 +1,40 @@
+toEnvSegment = (value) ->
+  String(value).replace(/[^A-Za-z0-9]/g, '_').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()
+
+expectedCredential = (pkgFolder, env = process.env) ->
+  env["#{toEnvSegment pkgFolder}_ENV_AUTH_TOKEN"] or env.AUTH_TOKEN or null
+
+buildCredentialGuard = (container, pkgFolder, {env = process.env} = {}) ->
+  (req, res, next) ->
+    header = req.headers?.authorization or ''
+    token = if header.startsWith('Bearer ') then header.slice(7) else null
+    expected = expectedCredential pkgFolder, env
+    verdict =
+      allowed: Boolean(expected) and token is expected
+      status: 401
+      message: if expected then 'Invalid or missing bearer credential' else 'Credential token not configured for this package'
+    verdict = await container.bus.pipeline 'credential:verify', verdict, {req, res, pkg: pkgFolder, token}
+    return next() if verdict?.allowed
+    res.status(verdict?.status ? 401).json {error: verdict?.message ? 'Credential rejected'}
+
+createCredentialModule = (options) ->
+  name: 'credential'
+  phase: 'boot'
+  install: (container) ->
+    container.state('credential').set 'buildGuard', (pkgFolder) -> buildCredentialGuard container, pkgFolder, options
+    return
+
+credentialModule = createCredentialModule()
+provideCredential = (host) ->
+  ###
+  @register module credential
+  @context capability
+  ###
+  name: 'credential'
+  phase: 'boot'
+  install: ->
+    createCredentialModule().install {state: host.state, bus: {pipeline: host.pipeline}}
+    return
+
+createHost = (args...) -> require('@thinkiac/module-runtime-compat').createHost args...
+module.exports = {toEnvSegment, expectedCredential, buildCredentialGuard, createCredentialModule, credentialModule, provideCredential, createHost, createRuntimeModule: provideCredential}
